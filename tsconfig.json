@@ -1,12 +1,10 @@
 {
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "src",
-    "moduleResolution": "node",
-    "target": "es2020",
     "module": "commonjs",
-    "strict": true,
+    "target": "es6",
     "esModuleInterop": true,
-    "skipLibCheck": true
-  }
+    "strict": true
+  },
+  "include": ["src/**/*"]
 }
