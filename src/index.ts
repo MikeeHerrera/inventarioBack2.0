@@ -4,7 +4,7 @@ import multer from "multer";
 import path from "path";
 import admin from "firebase-admin";
 
-const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_KEY as string);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
