@@ -9,7 +9,7 @@ const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   // Usa el bucket correcto: normalmente "tu-proyecto.appspot.com"
-  storageBucket: "elotitos-91a2f.firebasestorage.app",
+  storageBucket: "appbeer-5cb13.firebasestorage.app",
 });
 
 const db = admin.firestore();
