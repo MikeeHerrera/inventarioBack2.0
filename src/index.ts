@@ -1,4 +1,4 @@
-import express, { Request, Response } from "express";
+ import express, { Request, Response } from "express";
 import cors from "cors";
 import multer from "multer";
 import admin from "firebase-admin";
@@ -34,6 +34,13 @@ interface Material {
   quantity: number;
 }
 
+interface Topping {
+  materialId: string;
+  name: string;
+  price: number;
+  isActive: boolean;
+}
+
 interface SizeOption {
   name: string;
   price: number;
@@ -61,16 +68,20 @@ interface MaterialGroupEntry {
 interface Product {
   id?: string;
   name: string;
+  description?: string;
   categoryId: string;
   sizes: SizeOption[];
   images: string[];
   materialsGroup?: MaterialGroupEntry[];
+  toppings?: Topping[];
   stockHistory?: StockHistory[];
 }
 
 interface Category {
+  id?: string;
   name: string;
   image: string;
+  position?: number; // Optional, will be added dynamically
 }
 
 interface Customer {
@@ -111,7 +122,7 @@ app.get("/products", async (req: Request, res: Response) => {
     const snapshot = await db.collection("inventory").get();
     const products = snapshot.docs.map((doc) => ({
       id: doc.id,
-      ...doc.data()
+      ...doc.data(),
     }));
     return res.json(products);
   } catch (error: any) {
@@ -119,17 +130,17 @@ app.get("/products", async (req: Request, res: Response) => {
   }
 });
 
-// POST /products (crear nuevo producto)
+// POST /products
 app.post("/products", async (req: Request, res: Response) => {
   try {
-    const { name, categoryId, sizes, images, materialsGroup } = req.body as Partial<Product> & {
+    const { name, description, categoryId, sizes, images, materialsGroup, toppings } = req.body as Partial<Product> & {
       categoryId?: string;
       sizes?: SizeOption[];
       materialsGroup?: MaterialGroupEntry[];
       images?: string[];
+      toppings?: Topping[];
     };
 
-    // Validate required fields
     if (!name) {
       return res.status(400).json({ error: "El nombre del producto es requerido." });
     }
@@ -139,14 +150,29 @@ app.post("/products", async (req: Request, res: Response) => {
     if (!sizes || sizes.length === 0) {
       return res.status(400).json({ error: "Debe agregar al menos una opción de tamaño." });
     }
-
-    // Validate no materials for "Materiales" category
-    const materialCategoryId = "bsOZn7qdIizNleZ41Xs2";
-    if (categoryId === materialCategoryId && sizes.some(size => size.materials.length > 0)) {
-      return res.status(400).json({ error: "Los productos de la categoría Materiales no pueden tener materiales asociados." });
+    if (description && description.length > 500) {
+      return res.status(400).json({ error: "La descripción no puede exceder los 500 caracteres." });
     }
 
-    // Calculate production cost and profit for each size
+    const materialCategoryId = "bsOZn7qdIizNleZ41Xs2";
+    const toppingCategoryId = "NlMwnKfHw8PgUFDAFxlB";
+    if (categoryId === materialCategoryId || categoryId === toppingCategoryId) {
+      if (sizes.some((size) => size.materials.length > 0)) {
+        return res.status(400).json({ error: "Los productos de la categoría Materiales o Toppings no pueden tener materiales asociados." });
+      }
+      if (toppings && toppings.length > 0) {
+        return res.status(400).json({ error: "Los productos de la categoría Materiales o Toppings no pueden tener toppings asociados." });
+      }
+    }
+
+    if (toppings) {
+      for (const topping of toppings) {
+        if (!topping.materialId || !topping.name || topping.price < 0 || typeof topping.isActive !== "boolean") {
+          return res.status(400).json({ error: "Formato de topping inválido: debe incluir materialId, name, price y isActive." });
+        }
+      }
+    }
+
     const processedSizes = sizes.map((size) => {
       const productionCost = size.materials.reduce(
         (sum, material) => sum + material.cost * (material.quantity > 0 ? material.quantity : 1),
@@ -156,17 +182,17 @@ app.post("/products", async (req: Request, res: Response) => {
       return { ...size, productionCost, profit };
     });
 
-    // Create new product with materialsGroup
     const newProduct: Product = {
       name,
+      description: description || undefined,
       categoryId,
       sizes: processedSizes,
       images: images || [],
       materialsGroup: materialsGroup || [],
-      stockHistory: []
+      toppings: toppings || [],
+      stockHistory: [],
     };
 
-    // Save to Firestore
     const docRef = await db.collection("inventory").add(newProduct);
     return res.json({ id: docRef.id, ...newProduct });
   } catch (error: any) {
@@ -175,24 +201,42 @@ app.post("/products", async (req: Request, res: Response) => {
   }
 });
 
-// PUT /products/:id (actualizar producto)
+// PUT /products/:id
 app.put("/products/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { name, categoryId, sizes, images, materialsGroup } = req.body as Partial<Product> & {
+    const { name, description, categoryId, sizes, images, materialsGroup, toppings } = req.body as Partial<Product> & {
       categoryId?: string;
       sizes?: SizeOption[];
       materialsGroup?: MaterialGroupEntry[];
       images?: string[];
+      toppings?: Topping[];
     };
 
     if (!name) return res.status(400).json({ error: "El nombre del producto es requerido." });
     if (!categoryId) return res.status(400).json({ error: "La categoría del producto es requerida." });
     if (!sizes || sizes.length === 0) return res.status(400).json({ error: "Debe agregar al menos una opción de tamaño." });
+    if (description && description.length > 500) {
+      return res.status(400).json({ error: "La descripción no puede exceder los 500 caracteres." });
+    }
 
     const materialCategoryId = "bsOZn7qdIizNleZ41Xs2";
-    if (categoryId === materialCategoryId && sizes.some(size => size.materials.length > 0)) {
-      return res.status(400).json({ error: "Los productos de la categoría Materiales no pueden tener materiales asociados." });
+    const toppingCategoryId = "NlMwnKfHw8PgUFDAFxlB";
+    if (categoryId === materialCategoryId || categoryId === toppingCategoryId) {
+      if (sizes.some((size) => size.materials.length > 0)) {
+        return res.status(400).json({ error: "Los productos de la categoría Materiales o Toppings no pueden tener materiales asociados." });
+      }
+      if (toppings && toppings.length > 0) {
+        return res.status(400).json({ error: "Los productos de la categoría Materiales o Toppings no pueden tener toppings asociados." });
+      }
+    }
+
+    if (toppings) {
+      for (const topping of toppings) {
+        if (!topping.materialId || !topping.name || topping.price < 0 || typeof topping.isActive !== "boolean") {
+          return res.status(400).json({ error: "Formato de topping inválido: debe incluir materialId, name, price y isActive." });
+        }
+      }
     }
 
     const processedSizes = sizes.map((size) => {
@@ -204,7 +248,6 @@ app.put("/products/:id", async (req: Request, res: Response) => {
       return { ...size, productionCost, profit };
     });
 
-    // Fetch existing product to preserve images and stockHistory
     const productRef = db.collection("inventory").doc(id);
     const productSnapshot = await productRef.get();
     if (!productSnapshot.exists) {
@@ -214,11 +257,13 @@ app.put("/products/:id", async (req: Request, res: Response) => {
 
     const updatedProduct: Product = {
       name,
+      description: description || existingProduct.description || undefined,
       categoryId,
       sizes: processedSizes,
       images: images || existingProduct.images || [],
       materialsGroup: materialsGroup || existingProduct.materialsGroup || [],
-      stockHistory: existingProduct.stockHistory || []
+      toppings: toppings || existingProduct.toppings || [],
+      stockHistory: existingProduct.stockHistory || [],
     };
 
     await productRef.set(updatedProduct, { merge: true });
@@ -229,7 +274,7 @@ app.put("/products/:id", async (req: Request, res: Response) => {
   }
 });
 
-// POST /products/:id/upload (subir imágenes)
+// POST /products/:id/upload
 const upload = multer({ storage: multer.memoryStorage() });
 app.post("/products/:id/upload", upload.array("images"), async (req: Request, res: Response) => {
   try {
@@ -256,7 +301,7 @@ app.post("/products/:id/upload", upload.array("images"), async (req: Request, re
     }
 
     await productRef.update({
-      images: admin.firestore.FieldValue.arrayUnion(...imageUrls)
+      images: admin.firestore.FieldValue.arrayUnion(...imageUrls),
     });
 
     return res.json({ success: true, images: imageUrls });
@@ -266,7 +311,7 @@ app.post("/products/:id/upload", upload.array("images"), async (req: Request, re
   }
 });
 
-// PATCH /products/:id/stock (actualizar stock de un tamaño específico)
+// PATCH /products/:id/stock
 app.patch("/products/:id/stock", async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
@@ -301,12 +346,12 @@ app.patch("/products/:id/stock", async (req: Request, res: Response) => {
     const logEntry: StockHistory & { productId: string; productName: string; sizeName: string } = {
       date: new Date().toLocaleString(),
       addedStock: quantityDelta,
-      totalStockBefore: productData.sizes.find(s => s.name === sizeName)?.quantity ?? 0,
-      totalStockAfter: updatedSizes.find(s => s.name === sizeName)?.quantity ?? 0,
+      totalStockBefore: productData.sizes.find((s) => s.name === sizeName)?.quantity ?? 0,
+      totalStockAfter: updatedSizes.find((s) => s.name === sizeName)?.quantity ?? 0,
       notes: notes || "",
       productId: id,
       productName: productData.name,
-      sizeName
+      sizeName,
     };
     await db.collection("stockLogs").doc().set(logEntry);
     return res.json({ success: true, sizes: updatedSizes, log: logEntry });
@@ -320,16 +365,13 @@ app.get("/orders", async (req: Request, res: Response) => {
   try {
     const { start, end } = req.query;
 
-    // Validar parámetros
     if (!start || !end) {
       return res.status(400).json({ error: "Se requieren parámetros 'start' y 'end'" });
     }
 
-    // Convertir strings a Date
     const startDate = new Date(`${start}T00:00:00`);
     const endDate = new Date(`${end}T23:59:59`);
 
-    // Consulta a Firestore
     const snapshot = await db
       .collection("orders")
       .where("date", ">=", startDate)
@@ -357,10 +399,9 @@ app.post("/orders", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Faltan datos del pedido." });
     }
 
-    // Calculate production cost
     const productionCost = items.reduce((totalCost, item) => {
       const itemCost = item.materials.reduce((sum, material) => {
-        return sum + (material.cost * (material.quantity > 0 ? material.quantity : 1) * item.quantity);
+        return sum + material.cost * (material.quantity > 0 ? material.quantity : 1) * item.quantity;
       }, 0);
       return totalCost + itemCost;
     }, 0);
@@ -371,18 +412,15 @@ app.post("/orders", async (req: Request, res: Response) => {
       total,
       productionCost,
       customerId,
-      date: new Date()
+      date: new Date(),
     };
 
-    // Run transaction to ensure atomic updates
     const orderRef = db.collection("orders").doc();
     await db.runTransaction(async (transaction) => {
-      // Validate and collect product and material updates
       const productUpdates: { ref: admin.firestore.DocumentReference; sizes: SizeOption[]; totalQuantity: number }[] = [];
       const materialUpdates: { ref: admin.firestore.DocumentReference; sizes: SizeOption[]; totalQuantity: number }[] = [];
       const stockLogs: { entry: StockHistory & { productId: string; productName: string; sizeName: string } }[] = [];
 
-      // Validate customer if provided
       let customerRef: admin.firestore.DocumentReference | null = null;
       if (customerId) {
         customerRef = db.collection("customers").doc(customerId);
@@ -400,7 +438,6 @@ app.post("/orders", async (req: Request, res: Response) => {
         }
         const product = snap.data() as Product;
 
-        // Validate product stock
         let sizeFound = false;
         const updatedSizes = product.sizes.map((size) => {
           if (size.name === item.name) {
@@ -418,7 +455,6 @@ app.post("/orders", async (req: Request, res: Response) => {
         const newTotal = updatedSizes.reduce((sum, s) => sum + s.quantity, 0);
         productUpdates.push({ ref: productRef, sizes: updatedSizes, totalQuantity: newTotal });
 
-        // Validate and update material stock
         for (const material of item.materials) {
           const materialProductRef = db.collection("inventory").doc(material.uid);
           const materialSnap = await transaction.get(materialProductRef);
@@ -427,7 +463,7 @@ app.post("/orders", async (req: Request, res: Response) => {
           }
           const materialProduct = materialSnap.data() as Product;
           const materialSizes = materialProduct.sizes.map((size) => {
-            const newQuantity = size.quantity - (material.quantity * item.quantity);
+            const newQuantity = size.quantity - material.quantity * item.quantity;
             if (newQuantity < 0) {
               throw new Error(`Stock insuficiente para el material ${material.name}`);
             }
@@ -436,7 +472,6 @@ app.post("/orders", async (req: Request, res: Response) => {
           const materialTotal = materialSizes.reduce((sum, s) => sum + s.quantity, 0);
           materialUpdates.push({ ref: materialProductRef, sizes: materialSizes, totalQuantity: materialTotal });
 
-          // Prepare material stock log
           const materialLogEntry: StockHistory & { productId: string; productName: string; sizeName: string } = {
             date: new Date().toLocaleString(),
             addedStock: -(material.quantity * item.quantity),
@@ -445,13 +480,12 @@ app.post("/orders", async (req: Request, res: Response) => {
             notes: `Deducción por orden ${orderRef.id}`,
             productId: material.uid,
             productName: material.name,
-            sizeName: materialProduct.sizes[0]?.name || "Default"
+            sizeName: materialProduct.sizes[0]?.name || "Default",
           };
           stockLogs.push({ entry: materialLogEntry });
         }
       }
 
-      // Apply updates within transaction
       transaction.set(orderRef, orderData);
       productUpdates.forEach(({ ref, sizes, totalQuantity }) => {
         transaction.update(ref, { sizes, totalQuantity });
@@ -464,7 +498,7 @@ app.post("/orders", async (req: Request, res: Response) => {
       });
       if (customerId && customerRef) {
         transaction.update(customerRef, {
-          ordersCount: admin.firestore.FieldValue.increment(1)
+          ordersCount: admin.firestore.FieldValue.increment(1),
         });
       }
     });
@@ -520,7 +554,10 @@ app.post("/categories", upload.single("image"), async (req: Request, res: Respon
       await fileUpload.setMetadata({ metadata: { firebaseStorageDownloadTokens: fileName } });
       imageUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/categories%2F${encodeURIComponent(fileName)}?alt=media&token=${fileName}`;
     }
-    const newCategory: Category = { name, image: imageUrl };
+    // Get the current number of categories to determine the new position
+    const snapshot = await db.collection("categories").get();
+    const newPosition = snapshot.size;
+    const newCategory: Category = { name, image: imageUrl, position: newPosition };
     const docRef = await db.collection("categories").add(newCategory);
     return res.json({ id: docRef.id, ...newCategory });
   } catch (error: any) {
@@ -528,7 +565,90 @@ app.post("/categories", upload.single("image"), async (req: Request, res: Respon
   }
 });
 
-// DELETE /products/:id/images (eliminar una imagen de un producto)
+// PATCH /categories/positions
+app.patch("/categories/positions", async (req: Request, res: Response) => {
+  try {
+    const { categories } = req.body as { categories: { id: string; position: number }[] };
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      return res.status(400).json({ error: "Se requiere un array de categorías con id y position." });
+    }
+
+    // Validate input
+    for (const cat of categories) {
+      if (!cat.id || typeof cat.position !== "number") {
+        return res.status(400).json({ error: "Cada categoría debe tener id y position válidos." });
+      }
+    }
+
+    // Fetch all categories to ensure we update all positions
+    const snapshot = await db.collection("categories").get();
+    const existingCategories = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() } as Category));
+
+    // Update positions in a transaction
+    await db.runTransaction(async (transaction) => {
+      for (const cat of categories) {
+        const categoryRef = db.collection("categories").doc(cat.id);
+        const categorySnap = await transaction.get(categoryRef);
+        if (!categorySnap.exists) {
+          throw new Error(`Categoría no encontrada: ${cat.id}`);
+        }
+        const currentData = categorySnap.data() as Category;
+        transaction.set(
+          categoryRef,
+          {
+            ...currentData,
+            position: cat.position,
+          },
+          { merge: true }
+        );
+      }
+      // Ensure all categories have a position if they were missing it
+      for (const existingCat of existingCategories) {
+        if (!categories.find((c) => c.id === existingCat.id)) {
+          const nextPosition = categories.length;
+          const categoryRef = db.collection("categories").doc(existingCat.id ? existingCat.id : '');
+          const currentData = existingCat;
+          transaction.set(
+            categoryRef,
+            {
+              ...currentData,
+              position: nextPosition,
+            },
+            { merge: true }
+          );
+        }
+      }
+    });
+
+    return res.json({ success: true });
+  } catch (error: any) {
+    console.error("Error updating category positions:", error);
+    return res.status(500).json({ error: "Error al actualizar posiciones: " + error.message });
+  }
+});
+
+// PATCH /categories/:id
+app.patch("/categories/:id", async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { name } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: "El nombre de la categoría es requerido." });
+    }
+    const categoryRef = db.collection("categories").doc(id);
+    const categorySnap = await categoryRef.get();
+    if (!categorySnap.exists) {
+      return res.status(404).json({ error: "Categoría no encontrada." });
+    }
+    await categoryRef.update({ name });
+    return res.json({ success: true, id, name });
+  } catch (error: any) {
+    console.error("Error updating category name:", error);
+    return res.status(500).json({ error: "Error al actualizar el nombre de la categoría: " + error.message });
+  }
+});
+
+// DELETE /products/:id/images
 app.delete("/products/:id/images", async (req: Request, res: Response) => {
   try {
     const id = req.params.id;
@@ -537,23 +657,18 @@ app.delete("/products/:id/images", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "No se proporcionó la URL de la imagen." });
     }
 
-    // Convertimos la URL en un objeto para extraer el token que usamos como nombre de archivo
     const urlObj = new URL(imageUrl);
     const token = urlObj.searchParams.get("token");
     if (!token) {
       return res.status(400).json({ error: "No se pudo obtener el token de la imagen." });
     }
 
-    // El file path es "products/{productId}/{fileName}"
     const filePath = `products/${id}/${token}`;
     const file = bucket.file(filePath);
-
-    // Eliminamos el archivo del bucket
     await file.delete();
 
-    // Eliminamos la URL del arreglo de imágenes en Firestore
     await db.collection("inventory").doc(id).update({
-      images: admin.firestore.FieldValue.arrayRemove(imageUrl)
+      images: admin.firestore.FieldValue.arrayRemove(imageUrl),
     });
 
     return res.json({ success: true });
@@ -568,7 +683,7 @@ app.get("/customers", async (req: Request, res: Response) => {
     const snapshot = await db.collection("customers").get();
     const customers = snapshot.docs.map((doc) => ({
       id: doc.id,
-      ...doc.data()
+      ...doc.data(),
     }));
     return res.json(customers);
   } catch (error: any) {
@@ -582,7 +697,6 @@ app.post("/customers", async (req: Request, res: Response) => {
   try {
     const { uid, phoneNumber, name, photo, gender, email, address, notes, ordersCount } = req.body as Partial<Customer> & { uid: string };
 
-    // Validate required fields
     if (!uid) {
       return res.status(400).json({ error: "El UID de autenticación es requerido." });
     }
@@ -597,10 +711,9 @@ app.post("/customers", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "El número telefónico debe tener 10 dígitos." });
     }
 
-    // Check for duplicate phone number or UID
     const [phoneSnapshot, uidSnapshot] = await Promise.all([
       db.collection("customers").where("phoneNumber", "==", phoneNumber).get(),
-      db.collection("customers").doc(uid).get()
+      db.collection("customers").doc(uid).get(),
     ]);
     if (!phoneSnapshot.empty) {
       return res.status(400).json({ error: "El número telefónico ya está registrado." });
@@ -617,7 +730,7 @@ app.post("/customers", async (req: Request, res: Response) => {
       email: email || "",
       address: address || "",
       notes: notes || "",
-      ordersCount: ordersCount || 0
+      ordersCount: ordersCount || 0,
     };
 
     await db.collection("customers").doc(uid).set(newCustomer);
@@ -628,7 +741,7 @@ app.post("/customers", async (req: Request, res: Response) => {
   }
 });
 
-// POST /send-otp (Send OTP via WhatsApp)
+// POST /send-otp
 app.post("/send-otp", async (req: Request, res: Response) => {
   try {
     const { phoneNumber } = req.body;
@@ -640,25 +753,22 @@ app.post("/send-otp", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "El número telefónico debe tener el formato +52 seguido de 10 dígitos." });
     }
 
-    // Generate 6-digit OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const sessionId = Math.random().toString(36).substring(2);
     const verificationId = `verification-${sessionId}`;
 
-    // Send OTP via Twilio WhatsApp
     await twilioClient.messages.create({
       body: `Tu código de verificación para Elotitos es: ${otp}`,
       from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`,
-      to: `whatsapp:${phoneNumber}`
+      to: `whatsapp:${phoneNumber}`,
     });
 
-    // Store OTP in Firestore (expires in 5 minutes)
     await db.collection("otps").doc(sessionId).set({
       otp,
       phoneNumber,
       verificationId,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 5 * 60 * 1000))
+      expiresAt: admin.firestore.Timestamp.fromDate(new Date(Date.now() + 5 * 60 * 1000)),
     });
 
     return res.json({ success: true, sessionId });
@@ -668,7 +778,7 @@ app.post("/send-otp", async (req: Request, res: Response) => {
   }
 });
 
-// POST /verify-otp (Verify OTP)
+// POST /verify-otp
 app.post("/verify-otp", async (req: Request, res: Response) => {
   try {
     const { sessionId, otp, phoneNumber } = req.body;
@@ -696,7 +806,6 @@ app.post("/verify-otp", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Código OTP inválido." });
     }
 
-    // Delete OTP after successful verification
     await db.collection("otps").doc(sessionId).delete();
 
     return res.json({ success: true, verificationId });
@@ -707,11 +816,11 @@ app.post("/verify-otp", async (req: Request, res: Response) => {
 });
 
 // PRINT ORDER
-const escpos = require('escpos');
-escpos.Network = require('escpos-network');
+const escpos = require("escpos");
+escpos.Network = require("escpos-network");
 
 const printOrder = (order: Order, orderId: string) => {
-  const device = new escpos.Network('192.168.1.100', 9100);
+  const device = new escpos.Network("192.168.1.100", 9100);
   const printer = new escpos.Printer(device);
 
   device.open((err: any) => {
@@ -721,31 +830,31 @@ const printOrder = (order: Order, orderId: string) => {
     }
 
     printer
-      .hardware('init')
-      .raw('\x1B\x33\x00')
-      .align('ct')
-      .text(`---------- ELOTITOS ----------`)
+      .hardware("init")
+      .raw("\x1B\x33\x00")
+      .align("ct")
+      .text("---------- ELOTITOS ----------")
       .text(`Orden #${orderId}`)
-      .text(`WhatsApp 2381046602`)
+      .text("WhatsApp 2381046602")
       .text(`Fecha: ${order.date.toLocaleString()}`)
-      .text('--------------------------')
-      .align('lt')
+      .text("--------------------------")
+      .align("lt")
       .text(`Método de pago: ${order.paymentMethod}`)
       .text(`Total: $${order.total.toFixed(2)}`)
       .text(`Costo de producción: $${order.productionCost.toFixed(2)}`)
-      .text('--------------------------')
-      .raw('\x1B\x33\x00')
-      .text('Productos:');
+      .text("--------------------------")
+      .raw("\x1B\x33\x00")
+      .text("Productos:");
     order.items.forEach((item) => {
       printer.text(`${item.name} x${item.quantity} - $${item.subtotal.toFixed(2)}`);
     });
 
     printer
-      .text('--------------------------')
-      .align('ct')
-      .text('¡Gracias por su compra!')
-      .text('                                ')
-      .cut('partial')
+      .text("--------------------------")
+      .align("ct")
+      .text("¡Gracias por su compra!")
+      .text("                                ")
+      .cut("partial")
       .close();
   });
 };
@@ -754,3 +863,4 @@ const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`API escuchando en http://localhost:${PORT}`);
 });
+ 
