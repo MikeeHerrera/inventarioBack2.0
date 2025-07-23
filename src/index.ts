@@ -4,6 +4,7 @@ import multer from "multer";
 import admin from "firebase-admin";
 import dotenv from "dotenv";
 import twilio from "twilio";
+import axios from "axios";
 
 dotenv.config();
 
@@ -25,6 +26,15 @@ const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_A
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+interface Address {
+  id: string;
+  address: string;
+  lat: number;
+  lng: number;
+  isDefault: boolean;
+}
+
 
 /** INTERFACES **/
 interface Material {
@@ -812,6 +822,197 @@ app.post("/verify-otp", async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("Error verifying OTP:", error);
     return res.status(500).json({ error: "Error al verificar el código OTP: " + error.message });
+  }
+});
+
+
+app.get("/users/:uid/addresses", async (req: Request, res: Response) => {
+  try {
+    const { uid } = req.params;
+    const snapshot = await db.collection("users").doc(uid).collection("addresses").get();
+    const addresses = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
+    return res.json(addresses);
+  } catch (error: any) {
+    console.error("Error fetching addresses:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+
+// DELETE /users/:uid/addresses/:addressId
+app.delete("/users/:uid/addresses/:addressId", async (req: Request, res: Response) => {
+  try {
+    const { uid, addressId } = req.params;
+    
+    // Referencia al documento de la dirección en Firestore
+    const addressRef = db.collection("users").doc(uid).collection("addresses").doc(addressId);
+    
+    // Verificar si la dirección existe
+    const addressSnap = await addressRef.get();
+    if (!addressSnap.exists) {
+      return res.status(404).json({ error: "Dirección no encontrada." });
+    }
+    
+    // Eliminar la dirección
+    await addressRef.delete();
+    
+    return res.json({ success: true });
+  } catch (error: any) {
+    console.error("Error deleting address:", error);
+    return res.status(500).json({ error: "Error al eliminar la dirección: " + error.message });
+  }
+});
+
+ app.patch("/users/:uid/addresses/:addressId", async (req: Request, res: Response) => {
+  try {
+    const { uid, addressId } = req.params;
+    const addressData = req.body as Partial<Address>;
+
+    // Referencia al documento de la dirección en Firestore
+    const addressRef = db.collection("users").doc(uid).collection("addresses").doc(addressId);
+    
+    // Verificar si la dirección existe
+    const addressSnap = await addressRef.get();
+    if (!addressSnap.exists) {
+      return res.status(404).json({ error: "Dirección no encontrada." });
+    }
+
+    // Actualizar la dirección con los datos proporcionados
+    await addressRef.update(addressData);
+
+    // Si isDefault es true, establecer las demás direcciones como no predeterminadas
+    if (addressData.isDefault) {
+      const otherAddresses = await db.collection("users").doc(uid).collection("addresses").get();
+      otherAddresses.forEach(async (doc) => {
+        if (doc.id !== addressId) {
+          await doc.ref.update({ isDefault: false });
+        }
+      });
+    }
+
+    // Obtener los datos actualizados de la dirección
+    const updatedAddress = { id: addressId, ...addressSnap.data(), ...addressData };
+    return res.json(updatedAddress);
+  } catch (error: any) {
+    console.error("Error updating address:", error);
+    return res.status(500).json({ error: "Error al actualizar la dirección: " + error.message });
+  }
+});
+
+
+// POST /users/:uid/addresses
+app.post("/users/:uid/addresses", async (req: Request, res: Response) => {
+  try {
+    const { uid } = req.params;
+    const addressData = req.body as Address;
+
+    // Validate required fields
+    if (!addressData.id || !addressData.address || typeof addressData.lat !== "number" || typeof addressData.lng !== "number") {
+      return res.status(400).json({ error: "Faltan campos requeridos: id, address, lat, o lng." });
+    }
+
+    // Reference to the address document in Firestore
+    const addressRef = db.collection("users").doc(uid).collection("addresses").doc(addressData.id);
+
+    // Check if the address ID already exists
+    const addressSnap = await addressRef.get();
+    if (addressSnap.exists) {
+      return res.status(400).json({ error: "El ID de la dirección ya está en uso." });
+    }
+
+    // Save the address
+    await addressRef.set(addressData);
+
+    // If isDefault is true, set other addresses to isDefault: false
+    if (addressData.isDefault) {
+      const otherAddresses = await db.collection("users").doc(uid).collection("addresses").get();
+      otherAddresses.forEach(async (doc) => {
+        if (doc.id !== addressData.id) {
+          await doc.ref.update({ isDefault: false });
+        }
+      });
+    }
+
+    // Return the saved address
+    return res.json(addressData);
+  } catch (error: any) {
+    console.error("Error saving address:", error);
+    return res.status(500).json({ error: "Error al guardar la dirección: " + error.message });
+  }
+});
+
+
+//maps
+
+// Configuración para el cálculo de envío
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY; // Clave desde .env
+const FIXED_LOCATION = { lat: 18.4692033, lng: -97.393769 }; // Coordenadas fijas (Ciudad de México)
+
+// Interfaz para la entrada del endpoint de envío
+interface ShippingRequest {
+  address?: string;
+  coordinates?: { lat: number; lng: number };
+}
+
+// Función para calcular la distancia usando Google Distance Matrix API
+async function calculateDistance(origin: string, destination: string): Promise<number> {
+  const url = `https://maps.googleapis.com/maps/api/distancematrix/json?origins=${origin}&destinations=${destination}&key=${GOOGLE_API_KEY}`;
+  try {
+    const response = await axios.get(url);
+    const data = response.data;
+
+    if (data.status === 'OK') {
+      const distanceText = data.rows[0].elements[0].distance.text;
+      // Extraer número de distancia (en km)
+      const distanceKm = parseFloat(distanceText.replace(/[^\d.]/g, ''));
+      return distanceKm;
+    } else {
+      throw new Error(`Error al calcular la distancia: ${data.error_message || 'Desconocido'}`);
+    }
+  } catch (error) {
+    throw new Error(`Error en la solicitud a Google API: ${(error as any).message}`);
+  }
+}
+
+// Función para calcular el costo de envío
+function calculateShippingCost(distance: number): number {
+  const BASE_COST = 25; // Costo mínimo de $25 MXN
+  const COST_PER_KM = 4; // $4 MXN por kilómetro
+  const cost = Math.max(BASE_COST, BASE_COST + (distance * COST_PER_KM));
+  return Math.round(cost * 100) / 100; // Redondear a 2 decimales
+}
+
+// Endpoint para calcular el costo de envío
+app.post("/calculate_shipping", async (req: Request, res: Response) => {
+  try {
+    const { address, coordinates }: ShippingRequest = req.body;
+
+    // Validar entrada
+    if (!address && !coordinates) {
+      return res.status(400).json({ error: "Se requiere una dirección o coordenadas" });
+    }
+
+    // Preparar origen (dirección fija) y destino
+    const origin = `${FIXED_LOCATION.lat},${FIXED_LOCATION.lng}`;
+    const destination = address || `${coordinates!.lat},${coordinates!.lng}`;
+
+    // Calcular distancia
+    const distance = await calculateDistance(origin, destination);
+
+    // Calcular costo de envío
+    const cost = calculateShippingCost(distance);
+
+    return res.json({
+      distance_km: distance,
+      shipping_cost_mxn: cost,
+      currency: 'MXN'
+    });
+  } catch (error: any) {
+    console.error("Error al calcular el costo de envío:", error);
+    return res.status(500).json({ error: "Error al calcular el costo de envío: " + error.message });
   }
 });
 
